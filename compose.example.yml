@@ -1,0 +1,20 @@
+services:
+  silo-server-mcp:
+    container_name: silo-server-mcp
+    build: .
+    restart: unless-stopped
+    environment:
+      SILO_BASE_URL: ${SILO_BASE_URL:?Set SILO_BASE_URL}
+      SILO_TOKEN: ${SILO_TOKEN:?Set SILO_TOKEN}
+      SILO_MCP_AUTH_TOKEN: ${SILO_MCP_AUTH_TOKEN:?Set SILO_MCP_AUTH_TOKEN}
+      SILO_ALLOWED_HOSTS: ${SILO_ALLOWED_HOSTS:-localhost,localhost:*,127.0.0.1,127.0.0.1:*}
+      SILO_READONLY: ${SILO_READONLY:-1}
+      # SILO_PROFILE_ID: "1"
+    ports:
+      - "127.0.0.1:8123:8000"   # front with Caddy / Tailscale; don't expose publicly
+    env_file:
+      - stack.env
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
