@@ -118,10 +118,7 @@ The directory is on the MCP server's machine, not the client's. Do not use a hom
 | `SILO_OPENAPI_FILE` | none | Use a trusted local JSON spec instead of fetching it |
 | `SILO_OPENAPI_URL` | `<SILO_BASE_URL>/api/v2/openapi.json` | Alternate trusted spec URL; fetched without the Silo token |
 | `SILO_CACHE_DIR` | `~/.cache/silo-server-mcp` | Spec cache; `/tmp/silo-server-mcp` in Docker |
-| `SILO_REF_DEPTH` | `6` | Maximum schema reference expansion depth |
 | `SILO_TIMEOUT` | `60` | Upstream HTTP timeout, seconds per network phase |
-| `SILO_MAX_CHARS` | `60000` | Text output limit |
-| `SILO_SSE_SECONDS` | `5` | Maximum event-stream sampling time; also bounded by the output limit |
 | `SILO_FILES_DIR` | disabled | Dedicated root for optional local file access |
 | `SILO_TRANSPORT` | `stdio` | `stdio` or `http`; Docker uses `http` |
 | `SILO_MCP_AUTH_TOKEN` | required for HTTP | Separate MCP bearer token, at least 32 characters |

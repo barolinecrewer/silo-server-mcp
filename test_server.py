@@ -1,13 +1,13 @@
 """Offline regression check. Run with the dependencies declared in server.py."""
 import asyncio
 import base64
-import contextlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import unittest
 from unittest.mock import patch
 
 import httpx
@@ -16,14 +16,8 @@ from mcp.client.stdio import stdio_client
 from starlette.testclient import TestClient
 
 
-@contextlib.contextmanager
 def rejects(error=ValueError):
-    try:
-        yield
-    except error:
-        pass
-    else:
-        raise AssertionError(f"Expected {error.__name__}")
+    return unittest.TestCase().assertRaises(error)
 
 
 async def check(s, root):
@@ -39,7 +33,9 @@ async def check(s, root):
             return httpx.Response(200, content=b'file data', headers={'content-type': 'application/octet-stream'})
         return httpx.Response(200, json={'ok': True})
 
-    s._client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    assert s.client.follow_redirects is False
+    await s.client.aclose()
+    s.client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
     op = s.ALL_OPS['get_item']
     assert len(await s.list_tools()) == 4
     await s.call_tool_impl('silo_call_operation', {'operation_id': op.id, 'arguments': {'id': 'a/b', 'limit': 2, 'headers': {'Range': 'bytes=0-10'}}})
@@ -124,9 +120,7 @@ async def check(s, root):
     with rejects():
         s.shallow({'$ref': '#/components/schemas/Loop'})
     assert s.deref({'$ref': '#/components/schemas/Loop'})['type'] == 'object'
-    await s.close_client()
-    assert s.client().follow_redirects is False
-    await s.close_client()
+    await s.client.aclose()
 
     # A second server must not silently reuse the first server's cached spec.
     with patch.dict(os.environ, {'SILO_OPENAPI_FILE': '', 'SILO_CACHE_DIR': str(root / 'cache')}):

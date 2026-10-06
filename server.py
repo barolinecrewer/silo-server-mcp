@@ -19,12 +19,14 @@ import asyncio
 import base64
 import contextlib
 import fnmatch
+import functools
 import hashlib
 import json
 import math
 import os
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -35,44 +37,40 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 
-def env(name, default=""):
-    return os.environ.get(name, default)
-
-
 def log(*a):
     print("[silo-server-mcp]", *a, file=sys.stderr, flush=True)
 
 
-BASE = env("SILO_BASE_URL").rstrip("/")
+BASE = os.getenv("SILO_BASE_URL", "").rstrip("/")
 base_url = urlsplit(BASE)
 if (base_url.scheme not in ("http", "https") or not base_url.hostname
         or base_url.username or base_url.password or base_url.query or base_url.fragment
         or base_url.path not in ("", "/")):
     raise SystemExit("Set SILO_BASE_URL to your Silo server root, e.g. https://silo.example.com")
-TOKEN = env("SILO_TOKEN")
-MODE = env("SILO_MODE", "compact").lower()
+TOKEN = os.getenv("SILO_TOKEN", "")
+MODE = os.getenv("SILO_MODE", "compact").lower()
 if MODE not in ("compact", "full"):
     raise SystemExit("SILO_MODE must be compact or full")
-readonly = env("SILO_READONLY", "1").lower()
+readonly = os.getenv("SILO_READONLY", "1").lower()
 if readonly not in ("1", "true", "yes", "0", "false", "no"):
     raise SystemExit("SILO_READONLY must be 1 or 0 (true/false, yes/no also accepted)")
 READONLY = readonly in ("1", "true", "yes")
-TAGS = [t.strip() for t in env("SILO_TAGS").split(",") if t.strip()]
-EXCLUDE_TAGS = [t.strip() for t in env("SILO_EXCLUDE_TAGS").split(",") if t.strip()]
-TIMEOUT = float(env("SILO_TIMEOUT", "60"))
-MAX_CHARS = int(env("SILO_MAX_CHARS", "60000"))
-SSE_SECONDS = float(env("SILO_SSE_SECONDS", "5"))
-MAX_REF_DEPTH = int(env("SILO_REF_DEPTH", "6"))
-if not all(math.isfinite(n) and n > 0 for n in (TIMEOUT, MAX_CHARS, SSE_SECONDS, MAX_REF_DEPTH)):
-    raise SystemExit("Timeouts, output limits, and reference depth must be positive and finite")
-FILES_DIR = Path(env("SILO_FILES_DIR")).expanduser().resolve() if env("SILO_FILES_DIR") else None
+TAGS = [t.strip() for t in os.getenv("SILO_TAGS", "").split(",") if t.strip()]
+EXCLUDE_TAGS = [t.strip() for t in os.getenv("SILO_EXCLUDE_TAGS", "").split(",") if t.strip()]
+TIMEOUT = float(os.getenv("SILO_TIMEOUT", "60"))
+if not (math.isfinite(TIMEOUT) and TIMEOUT > 0):
+    raise SystemExit("SILO_TIMEOUT must be positive and finite")
+MAX_CHARS = 60000
+SSE_SECONDS = 5
+MAX_REF_DEPTH = 6
+FILES_DIR = Path(os.getenv("SILO_FILES_DIR")).expanduser().resolve() if os.getenv("SILO_FILES_DIR") else None
 MAX_FILE_BYTES = 64 * 1024 * 1024
 
 DEFAULT_HEADERS = {}
-if env("SILO_PROFILE_ID"):
-    DEFAULT_HEADERS["X-Profile-Id"] = env("SILO_PROFILE_ID")
-if env("SILO_PROFILE_TOKEN"):
-    DEFAULT_HEADERS["X-Profile-Token"] = env("SILO_PROFILE_TOKEN")
+if os.getenv("SILO_PROFILE_ID"):
+    DEFAULT_HEADERS["X-Profile-Id"] = os.getenv("SILO_PROFILE_ID")
+if os.getenv("SILO_PROFILE_TOKEN"):
+    DEFAULT_HEADERS["X-Profile-Token"] = os.getenv("SILO_PROFILE_TOKEN")
 
 METHODS = ("get", "post", "put", "patch", "delete", "head", "options")
 RESERVED = {"body", "headers", "save_to"}
@@ -81,11 +79,11 @@ RESERVED = {"body", "headers", "save_to"}
 # --------------------------------------------------------------------------- spec
 
 def load_spec():
-    f = env("SILO_OPENAPI_FILE")
+    f = os.getenv("SILO_OPENAPI_FILE")
     if f:
         return json.loads(Path(f).read_text())
-    url = env("SILO_OPENAPI_URL", BASE + "/api/v2/openapi.json")
-    cache = Path(env("SILO_CACHE_DIR", str(Path.home() / ".cache" / "silo-server-mcp"))) / (hashlib.sha256(url.encode()).hexdigest() + ".json")
+    url = os.getenv("SILO_OPENAPI_URL", BASE + "/api/v2/openapi.json")
+    cache = Path(os.getenv("SILO_CACHE_DIR", str(Path.home() / ".cache" / "silo-server-mcp"))) / (hashlib.sha256(url.encode()).hexdigest() + ".json")
     try:
         r = httpx.get(url, timeout=60, follow_redirects=True)
         r.raise_for_status()
@@ -186,7 +184,6 @@ class Op:
             if str(code).startswith("2"):
                 self.response_types.update((shallow(resp).get("content") or {}).keys())
         self.public = not o.get("security", SPEC.get("security", []))
-        self._schema = None
         self.argmap = {}
         params = self.path_params + self.query_params
         for p in params:
@@ -201,9 +198,8 @@ class Op:
     def read_only(self):
         return self.method in ("get", "head", "options")
 
+    @functools.cached_property
     def input_schema(self):
-        if self._schema is not None:
-            return self._schema
         props, req = {}, []
         for key, (loc, name, p) in self.argmap.items():
             s = deref(p.get("schema", {}))
@@ -237,8 +233,7 @@ class Op:
             + ("Declared here: " + ", ".join(sorted({p['name'] for p in self.header_params if p['name'] != 'Authorization'})) if self.header_params else ""),
         }
         props["save_to"] = {"type": "string", "description": "Save to a new relative file within SILO_FILES_DIR (must be enabled). Never overwrites existing files; maximum 64 MiB."}
-        self._schema = {"type": "object", "properties": props, "required": req, "additionalProperties": False}
-        return self._schema
+        return {"type": "object", "properties": props, "required": req, "additionalProperties": False}
 
     def describe(self):
         head = f"[{self.tag}] {self.method.upper()} {self.path}"
@@ -285,21 +280,7 @@ OPS = {k: v for k, v in ALL_OPS.items() if allowed(v)}
 
 # --------------------------------------------------------------------------- execution
 
-_client = None
-
-
-def client():
-    global _client
-    if _client is None:
-        _client = httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=False)
-    return _client
-
-
-async def close_client():
-    global _client
-    if _client is not None:
-        await _client.aclose()
-        _client = None
+client = httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=False)
 
 
 def local_file(value):
@@ -422,7 +403,7 @@ async def execute(op, args):
         raise ValueError(f"Operation {op.id} is disabled")
     args = {} if args is None else args
     try:
-        jsonschema.validate(args, op.input_schema())
+        jsonschema.validate(args, op.input_schema)
     except jsonschema.ValidationError as e:
         raise ValueError(f"Invalid arguments at {'.'.join(map(str, e.absolute_path)) or 'root'}: {e.message}") from None
     args = dict(args)
@@ -497,7 +478,7 @@ async def execute(op, args):
             headers.setdefault("Content-Type", op.body_ctype)
         else:
             raise ValueError(f"Unsupported request content type: {op.body_ctype}")
-    async with client().stream(op.method.upper(), BASE + path, params=query, headers=headers, **kw) as r:
+    async with client.stream(op.method.upper(), BASE + path, params=query, headers=headers, **kw) as r:
         content, status = await render(r, save_to)
     if status >= 300 and status != 304:
         text = "\n".join(c.text for c in content if isinstance(c, types.TextContent))
@@ -575,7 +556,7 @@ def helper_tools():
 async def list_tools():
     if MODE == "full":
         return [
-            types.Tool(name=op.id, description=op.describe(), inputSchema=op.input_schema(), annotations=annotations(op))
+            types.Tool(name=op.id, description=op.describe(), inputSchema=op.input_schema, annotations=annotations(op))
             for op in OPS.values()
         ]
     return helper_tools()
@@ -593,6 +574,7 @@ def get_op(name):
     return op
 
 
+@server.call_tool(validate_input=False)
 async def call_tool_impl(name, arguments):
     arguments = {} if arguments is None else arguments
     if MODE != "full":
@@ -604,9 +586,7 @@ async def call_tool_impl(name, arguments):
         except jsonschema.ValidationError as e:
             raise ValueError(f"Invalid tool arguments: {e.message}") from None
         if name == "silo_list_tags":
-            counts = {}
-            for op in OPS.values():
-                counts[op.tag] = counts.get(op.tag, 0) + 1
+            counts = Counter(op.tag for op in OPS.values())
             return text("\n".join(f"{t}: {n}" for t, n in sorted(counts.items())))
         if name == "silo_search_operations":
             words = (arguments.get("query") or "").lower().split()
@@ -630,7 +610,7 @@ async def call_tool_impl(name, arguments):
                 "operation_id": op.id, "method": op.method.upper(), "path": op.path, "tag": op.tag,
                 "summary": op.summary, "description": op.description,
                 "requires_auth": not op.public, "response_types": sorted(op.response_types),
-                "input_schema": op.input_schema(),
+                "input_schema": op.input_schema,
             }, ensure_ascii=False))
         if name == "silo_call_operation":
             return await execute(get_op(arguments.get("operation_id", "")), arguments.get("arguments"))
@@ -638,17 +618,12 @@ async def call_tool_impl(name, arguments):
     return await execute(get_op(name), arguments)
 
 
-@server.call_tool(validate_input=False)
-async def call_tool(name: str, arguments: dict):
-    return await call_tool_impl(name, arguments)
-
-
 async def amain():
     try:
         async with stdio_server() as (r, w):
             await server.run(r, w, server.create_initialization_options())
     finally:
-        await close_client()
+        await client.aclose()
 
 
 def http_app():
@@ -661,14 +636,14 @@ def http_app():
     from starlette.responses import JSONResponse, PlainTextResponse
     from starlette.routing import Mount, Route
 
-    gate = env("SILO_MCP_AUTH_TOKEN")
+    gate = os.getenv("SILO_MCP_AUTH_TOKEN", "")
     if len(gate) < 32 or not gate.isascii() or any(c.isspace() for c in gate):
         raise ValueError("HTTP requires SILO_MCP_AUTH_TOKEN (at least 32 ASCII characters without whitespace)")
-    path = env("SILO_MCP_PATH", "mcp").strip("/")
+    path = os.getenv("SILO_MCP_PATH", "mcp").strip("/")
     if not re.fullmatch(r"[A-Za-z0-9_-]+", path) or path in ("auto", "healthz"):
         raise ValueError("SILO_MCP_PATH must be a single URL segment; auto and healthz are reserved")
-    hosts = [h.strip() for h in env("SILO_ALLOWED_HOSTS", "localhost,localhost:*,127.0.0.1,127.0.0.1:*,[::1],[::1]:*").split(",") if h.strip()]
-    origins = [o.strip() for o in env("SILO_ALLOWED_ORIGINS").split(",") if o.strip()]
+    hosts = [h.strip() for h in os.getenv("SILO_ALLOWED_HOSTS", "localhost,localhost:*,127.0.0.1,127.0.0.1:*,[::1],[::1]:*").split(",") if h.strip()]
+    origins = [o.strip() for o in os.getenv("SILO_ALLOWED_ORIGINS", "").split(",") if o.strip()]
     manager = StreamableHTTPSessionManager(app=server, stateless=True, security_settings=TransportSecuritySettings(
         allowed_hosts=hosts, allowed_origins=origins,
     ))
@@ -689,7 +664,7 @@ def http_app():
             async with manager.run():
                 yield
         finally:
-            await close_client()
+            await client.aclose()
 
     return Starlette(
         routes=[Route("/healthz", health), Mount(f"/{path}", app=mcp_app)],
@@ -700,28 +675,22 @@ def http_app():
 def serve_http():
     import uvicorn
 
-    uvicorn.run(http_app(), host=env("SILO_HOST", "127.0.0.1"), port=int(env("SILO_PORT", "8000")), log_level="info")
+    uvicorn.run(http_app(), host=os.getenv("SILO_HOST", "127.0.0.1"), port=int(os.getenv("SILO_PORT", "8000")), log_level="info")
 
 
 if __name__ == "__main__":
     if "--check" in sys.argv:
-        tags = {}
-        for op in OPS.values():
-            tags[op.tag] = tags.get(op.tag, 0) + 1
+        tags = Counter(op.tag for op in OPS.values())
         print(f"spec: {SPEC['info']['title']} v{SPEC['info']['version']}  base: {BASE}")
         print(f"operations total={len(ALL_OPS)} exposed={len(OPS)} mode={MODE} readonly={READONLY} token={'set' if TOKEN else 'unset'}")
         print(f"tags: {len(tags)}")
-        bad = [op.id for op in ALL_OPS.values() if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", op.id)]
-        print("bad names:", bad)
-        if bad:
-            sys.exit(1)
         for op in OPS.values():
-            jsonschema.Draft202012Validator.check_schema(op.input_schema())
-        size = sum(len(json.dumps(op.input_schema())) for op in OPS.values())
+            jsonschema.Draft202012Validator.check_schema(op.input_schema)
+        size = sum(len(json.dumps(op.input_schema)) for op in OPS.values())
         print(f"full-mode schema payload: {size/1e6:.2f} MB")
         sys.exit(0)
     log(f"{len(OPS)} operations, mode={MODE}, base={BASE}, token={'set' if TOKEN else 'unset'}")
-    transport = env("SILO_TRANSPORT", "stdio").lower()
+    transport = os.getenv("SILO_TRANSPORT", "stdio").lower()
     if transport in ("http", "streamable-http"):
         serve_http()
     elif transport == "stdio":
