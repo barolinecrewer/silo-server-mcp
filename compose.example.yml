@@ -1,7 +1,7 @@
 services:
   silo-server-mcp:
     container_name: silo-server-mcp
-    build: .
+    image: ghcr.io/barolinecrewer/silo-server-mcp:latest  # build: . to build from source instead
     restart: unless-stopped
     ports:
       - "127.0.0.1:8123:8000"   # front with Caddy / Tailscale; don't expose publicly

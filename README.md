@@ -53,8 +53,10 @@ There are two separate credentials:
 cp stack.env.example stack.env
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 # Edit stack.env with your Silo URL, Silo API key, and the generated MCP token.
-docker compose --env-file stack.env -f compose.example.yml up --build -d
+docker compose --env-file stack.env -f compose.example.yml up -d
 ```
+
+Compose pulls the prebuilt image from ghcr.io; no ghcr.io login or local build is required. To build from source instead, replace the `image:` line in `compose.example.yml` with `build: .` and run the same command with `--build`.
 
 Paste the generated token into `SILO_MCP_AUTH_TOKEN` in `stack.env`, without a `Bearer ` prefix. Put the same token in your MCP client's `Authorization` header as `Bearer <token>`, as shown below. The server checks that the values match before accepting a connection. Keep the token private: anyone holding it can call the operations enabled by your MCP configuration.
 
